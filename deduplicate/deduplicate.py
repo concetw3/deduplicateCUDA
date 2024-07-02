@@ -1,41 +1,56 @@
 from typing import List, Tuple, Union
-
 import click
 import numpy as np
 import vpype as vp
 import vpype_cli
 from shapely.geometry import MultiLineString
 from tqdm import tqdm
+from numba import cuda
 
+@cuda.jit
+def compare_lines_gpu(line_arr, tolerance, mask):
+    i = cuda.grid(1)
+    if i < len(line_arr) - 1:
+        for j in range(i + 1, len(line_arr)):
+            if all_close(line_arr[i], line_arr[j], tolerance):
+                mask[j] = True
+            elif all_close(line_arr[i][::-1], line_arr[j], tolerance):  # Reversed comparison
+                mask[j] = True
 
-def _deduplicate_layer(
-    lines: vp.LineCollection, tolerance: float, progress_bar: bool, keep_duplicates: bool
-) -> Tuple[vp.LineCollection, vp.LineCollection]:
+@cuda.jit(device=True)
+def all_close(a, b, atol):
+    for i in range(a.shape[0]):
+        for j in range(a.shape[1]):
+            if abs(a[i, j] - b[i, j]) > atol:
+                return False
+    return True
+
+def _deduplicate_layer(lines: vp.LineCollection, tolerance: float, progress_bar: bool, keep_duplicates: bool) -> Tuple[vp.LineCollection, vp.LineCollection]:
     """Deduplicate lines of a single layer."""
 
-    # Splitall lines into segments
+    # Split all lines into segments
     split_lines = vp.LineCollection()
     for line in lines:
-        split_lines.extend(
-            [line[i : i + 2] for i in range(len(line) - 1) if line[i] != line[i + 1]]
-        )
+        split_lines.extend([line[i : i + 2] for i in range(len(line) - 1) if line[i] != line[i + 1]])
 
     lc = vp.LineCollection()
     removed_lines = vp.LineCollection()
     line_arr = np.array([np.array(line.coords) for line in split_lines.as_mls().geoms])
     mask = np.zeros(len(line_arr), dtype=bool)
 
-    for i, line in enumerate(tqdm(line_arr[:-1], disable=progress_bar)):
-        reshaped = line.reshape(-1, 2, 2)
-        # Matching start and end points
-        mask[i + 1 :] |= np.all(
-            np.isclose(reshaped, line_arr[i + 1 :], atol=tolerance), axis=(1, 2)
-        )
-        # Matching end and start points
-        mask[i + 1 :] |= np.all(
-            np.isclose(reshaped[:, ::-1, :], line_arr[i + 1 :], atol=tolerance),
-            axis=(1, 2),
-        )
+    # Move data to GPU
+    d_line_arr = cuda.to_device(line_arr)
+    d_mask = cuda.to_device(mask)
+
+    # Configure the blocks
+    threadsperblock = 32
+    blockspergrid = (len(line_arr) + (threadsperblock - 1)) // threadsperblock
+
+    # Run the GPU function
+    compare_lines_gpu[blockspergrid, threadsperblock](d_line_arr, tolerance, d_mask)
+
+    # Copy the result back to the host
+    d_mask.copy_to_host(mask)
 
     if keep_duplicates:
         removed_lines.extend(MultiLineString(list(line_arr[mask])))
@@ -44,7 +59,6 @@ def _deduplicate_layer(
     lc.extend(MultiLineString(list(line_arr)))
 
     return lc, removed_lines
-
 
 @click.command()
 @click.option(
@@ -62,7 +76,7 @@ def _deduplicate_layer(
     "--layer",
     type=vpype_cli.LayerType(accept_multiple=True),
     default="all",
-    help="Target layer(s) (defaul: 'all')",
+    help="Target layer(s) (default: 'all')",
 )
 @click.option(
     "-k",
@@ -86,15 +100,12 @@ def deduplicate(
     removed_layer_id = document.free_id()
 
     for lines, l_id in zip(document.layers_from_ids(layer_ids), layer_ids):
-        new_lines, removed_lines = _deduplicate_layer(
-            lines, tolerance, progress_bar, keep_duplicates
-        )
+        new_lines, removed_lines = _deduplicate_layer(lines, tolerance, progress_bar, keep_duplicates)
         new_document.add(new_lines, layer_id=l_id)
 
         if keep_duplicates and not removed_lines.is_empty():
             new_document.add(removed_lines, layer_id=removed_layer_id)
 
     return new_document
-
 
 deduplicate.help_group = "Plugins"

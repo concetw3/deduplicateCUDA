@@ -1,6 +1,6 @@
 # deduplicate
 
-[`vpype`](https://github.com/abey79/vpype) plug-in to remove overlapping lines in SVG files. ( Using GPU card(CUDA 11.2) instead of CPU -- tested with RTX 2080)
+[`vpype`](https://github.com/abey79/vpype) plug-in to remove overlapping lines in SVG files. (Using GPU card CUDA 11.2 instead of CPU -- tested with RTX 2080)
 
 
 ## Usage

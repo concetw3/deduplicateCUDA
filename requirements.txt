@@ -1,6 +1,7 @@
 # base
 click
 vpype
+numba
 
 # other
 tqdm==4.61.1
